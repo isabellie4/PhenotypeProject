@@ -1,0 +1,284 @@
+---
+title: "MBNI_IlluminaRatRef12v1_F15"
+date: "Illumina microarray study on P14 HR/LR"
+
+output: pdf_document
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#knitr::opts_knit$set(root.dir = normalizePath(".."))
+knitr::opts_knit$set(root.dir = "~/Phenotype Project/ibirt")
+```
+
+This file reproduces Sarah Clinton's Illumina P14 analysis. The data file we have is normalized and annotated, so this file consists of code for some quick outlier checks, cell type analysis, the ANOVA of phenotype effects and the t-tests for the meta-analysis.
+
+The directory / files structure for this analysis file is as follows:
+
+* The `data/MBNI Illumina P14` directory contains the input data file which is named `Illumina_HRLR_P14_F15_NormData_rmpredicted.csv`.
+* The `output/MBNI Illumina P14` directory contains all the output, including graphs and the results of the ANOVA and t-tests.
+* The `bib/MBNI Illumina P14` directory contains the results of the cell type analysis.
+* The `code/` directory contains this file and the resultant PDF file.
+
+The first code chunk loads the libraries which will be used.
+
+```{r loadLib, warning=FALSE}
+
+library(plyr)
+library(car)
+library(knitr)
+
+```
+
+The next data chunk loads the data.
+
+```{r loadData}
+
+dataDir <- "data/MBNI Illumina P14/"
+outDir <- "output/MBNI Illumina P14/"
+qcDir <- "qc/MBNI Illumina P14/"
+
+
+inFile <- "Illumina_HRLR_P14_F15_NormData_rmpredicted.csv"
+
+illuminadata <- read.csv(paste0(dataDir, inFile))
+
+```
+
+### Outlier Check
+The next code chunk checks for outliers using box plots and correlation.
+
+```{r outlierCheck, fig.align='center', fig.width=7}
+
+# print the box plot in-file
+boxplot(illuminadata[, c(6:17)],
+        cex=0.25, las=3,
+        par(cex.axis=0.75),
+        main="Boxplot of log signal values per sample (1 box=all filtered probes)",
+        xlab="Sample ID", ylab="Log Signal")
+
+# the heat map of correlations
+heatmap(cor(illuminadata[, c(6:17)]),
+        main = "Correlation between log signal values")
+
+```
+
+The correlations are pretty much all 0.99 and up, except HR_27 which is 0.98. Not enough to exclude from the analysis.
+
+
+## Normalization
+The following code chunk removes NAs, averages across duplicates (there are 838) and then scales and centers the data. 
+
+```{r normalize}
+
+# remove na gene symbols
+illuminanoNA <- illuminadata[which(!is.na(illuminadata$Symbol)), ]
+
+dim(illuminanoNA)
+
+# Check for duplicates
+sum(duplicated(illuminanoNA$Symbol))
+
+#lots of duplicates
+
+colnames(illuminanoNA)
+
+# There are 838 duplicates. We average by gene symbol to remove the duplicates.
+valueCols <- grep("^[HL]R", colnames(illuminanoNA))
+valueCols <- colnames(illuminanoNA)[valueCols] #subject cols
+
+
+illuminaAverage <- sapply(valueCols, function(x, frame) {
+  tapply(frame[[x]], frame$Symbol, mean)
+}, frame = illuminanoNA)
+
+# no need to set colnames and row names as they are automatically set.
+dim(illuminaAverage)
+
+# get the z-scores
+illuminaZscore <- t(scale(t(illuminaAverage), scale = TRUE, center = TRUE))
+illuminaZscore <- cbind.data.frame(GeneSymbol = row.names(illuminaAverage),
+                                illuminaZscore)  #adding back row of genesymbols
+
+```
+
+
+
+## Cell Type Analysis
+
+The following code matches the gene symbols to cell types and gets the average of the z-score by cell type.
+
+```{r celltype}
+
+cellInfo <- read.csv("data/CellTypeSpecificGenes_Master3.csv")
+colnames(cellInfo)[5] <- "GeneSymbol"
+
+illuminaCellType <- join(illuminaZscore, cellInfo,
+                     by = "GeneSymbol", type = "inner")
+
+# remove repeating cell types
+noPrimaryOverlap <- lapply(levels(illuminaCellType$CellType_Primary),
+                           function(x, celltype) {
+  
+  # choose all data for a particular primary cell type
+  tempData <- celltype[which(celltype$CellType_Primary == x), ]
+  
+  # get all gene symbols within the current primary cell type
+  tempGenes <- tempData$GeneSymbol
+  
+  # gene symbols within all toher cell types
+  otherGenes <- celltype$GeneSymbol[which(celltype$CellType_Primary != x)]
+  
+  # now grab the rows which are not in otherGenes
+  return(tempData[which(!(tempGenes %in% otherGenes)), ])
+}, celltype = illuminaCellType)
+
+# combine the results
+noPrimaryOverlap <- do.call(rbind, noPrimaryOverlap)
+
+# some genes are duplicated
+sum(duplicated(noPrimaryOverlap$GeneSymbol))
+
+#Removing duplicate genes
+noPrimaryOverlap<-subset(noPrimaryOverlap, 
+                         !duplicated(noPrimaryOverlap$GeneSymbol))
+
+# average over cell types
+avgCellType <- sapply(valueCols, function(x, frame) {
+  tapply(frame[[x]], frame[["CellType_Primary"]], mean, na.rm = TRUE)
+}, frame = noPrimaryOverlap)
+
+```
+
+
+
+## Analyzing Cell Type Phenotype Effects
+The next few code chunks add in the phenotype data, draw the box plots and conduct an AVONA for the phenotype effects.
+
+
+```{r phenotype, fig.align='center', fig.width=7, fig.height=4}
+
+# keep only HR / LR from the column names
+phenotype <- as.factor(gsub(".{3}$", "", valueCols)) 
+
+phenEffectCellType <- cbind.data.frame(phenotype, t(avgCellType))
+
+# draw the box plots. Print to PDF output rather than separate files.
+for (i in 2:length(row.names(avgCellType))) {
+  boxplot(phenEffectCellType[[i]] ~ phenEffectCellType$phenotype,
+          ylab = row.names(avgCellType)[i], 
+          main=paste(row.names(avgCellType)[i], "vs Phenotype"),
+          col=(i+6), border=(i), pch=20)
+}
+
+```
+
+Now moving on to the phenotype ANOVA. Will also print this in-file and save p-values.
+
+```{r cellAnova, results='asis'}
+
+cNames <- colnames(phenEffectCellType)[2:11]
+
+anovaPhen <- lapply(phenEffectCellType[cNames], function(x, dataFrame) {
+  Anova(lm(x ~ phenotype, data = dataFrame, 
+           contrasts = list(phenotype=contr.sum)), 
+        type = 3)
+  }, dataFrame = phenEffectCellType)
+
+# Store it in matrix form
+CellTypeAnovaPvals <- matrix(0, 10, 1)
+colnames(CellTypeAnovaPvals) <- c("p-value")
+row.names(CellTypeAnovaPvals) <- colnames(phenEffectCellType[2:11])
+
+for (i in 1:10) {
+  CellTypeAnovaPvals[i, ] <- anovaPhen[[i]]$`Pr(>F)`[2]
+}
+
+# Save it
+write.csv(CellTypeAnovaPvals, 
+          paste0(outDir, "CellTypeAnovaPvals_P14Illumina.csv"))
+
+# Now, anovaPhen has all the ANOVA stuff. Print it.
+for(i in 1:length(anovaPhen)){
+  print(kable(anovaPhen[[i]], caption=names(anovaPhen)[i]))
+}
+
+
+```
+
+
+## Phenotype Effect by Gene Symbol
+
+Now run the ANOVA for genes. The process is quite the same.
+
+```{r phenGene}
+
+# keep only the numeric data
+illuminaZscore$GeneSymbol <- NULL
+
+zscoreByGeneTranspose <- cbind.data.frame(phenotype, t(illuminaZscore))
+
+# Now, loop over all genes to get the ANOVA
+illuminaOutput <- sapply(row.names(illuminaZscore), function(x, frame) {
+  
+  Anova(lm(frame[[x]] ~ phenotype,
+           data = frame,
+           contrasts = c(phenotype = contr.sum)),
+        type = 3)$"Pr(>F)"[2]
+  
+}, frame = zscoreByGeneTranspose)
+
+phenotypeEffects <- cbind.data.frame("GeneSymbol" = names(illuminaOutput),
+                                     "p-value" = illuminaOutput)
+
+phenotypeEffectsCellInfo <- join(phenotypeEffects, cellInfo,
+                                 by="GeneSymbol", type="left")
+
+# write to file
+write.csv(phenotypeEffectsCellInfo,
+          paste0(outDir, "SarahP14Illumina_PhenPval_CellInfo.csv"))
+
+```
+
+
+## T-tests for meta-analysis
+
+The following code chunk does the t-tests for the meta-analysis and writes the results to a file.
+
+```{r metaAnalysis}
+
+#Use log data (non-zscore transformed) with duplicate gene symbols removed
+head(illuminaAverage)
+
+# transpose and combine with phenotype
+illuminaPhenEffects <- cbind.data.frame(phenotype, t(illuminaAverage))
+
+phenTtests <- sapply(row.names(illuminaAverage), function(x, frame) {
+  
+  t.test(frame[[x]] ~ phenotype, data = frame)$statistic
+  
+}, frame = illuminaPhenEffects)
+
+# write to file
+phenTtests <- as.data.frame(phenTtests)
+row.names(phenTtests) <- row.names(illuminaAverage)
+colnames(phenTtests) <- c("Illumina t-test")
+
+write.csv(phenTtests, paste0(outDir, "illuminaP14TT.csv"))
+
+# Cell type t-tests for meta-analysis
+
+cellTypeTtests <- sapply(colnames(phenEffectCellType)[-1], function(x, frame) {
+  
+  t.test(frame[[x]] ~ phenotype, data = frame)$statistic
+  
+}, frame = phenEffectCellType)
+
+cellTypeTtests <- as.data.frame(cellTypeTtests)
+row.names(cellTypeTtests) <- colnames(phenEffectCellType)[-1]
+colnames(cellTypeTtests) <- c("Illumina t-test")
+
+write.csv(cellTypeTtests, paste0(outDir, "P14IlluminaCellTypeTT_forMeta.csv"))
+
+```
