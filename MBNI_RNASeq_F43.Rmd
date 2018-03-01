@@ -1,0 +1,342 @@
+---
+title: "MBNI_RNASeq_F43"
+date: "RNA-seq study on vehicle injected adult HR/LR"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Phenotype Project/ibirt")
+```
+
+
+The original data used in this file is from a study by Dr. Cigdem Aydin and includes RNA-seq data on HR and LR adult rats under various conditions: Stressed and not-stressed, as well as three drug categories: FLX, DMI, and VEH. This file contains code for the analysis of only the non-stressed HR and LR control rats given VEH treatment.
+
+```{r loadLibraries, echo=TRUE, results='hide', warning=FALSE}
+
+library(plyr)
+library(car)
+library(knitr)
+
+```
+
+Setting up the directories and loading the data. The data has already been pre-processed and logbase2 transformed. Annotation for the data is provided in a .csv file.
+
+```{r loadData}
+
+## Setting directories
+
+dataDir <- "data/Aydin RNAseq F43/"
+outDir <- "output/Aydin RNAseq F43/"
+qcDir <- "qc/Aydin RNAseq F43/"
+
+
+## Reading in the data
+
+cellData<- read.csv("Read-in files/CellTypeSpecificGenes_Master3.csv") 
+#Contains the celltype specific gene information
+
+vehicleData<- read.csv(paste0(dataDir, "CigdemNew.csv")) 
+#Contains the log-transformed read data for each subject, summarized by gene Ensemble ID
+
+dim(vehicleData)
+
+vehicleDataNum<- vehicleData[,-1]#makes an entirely numeric dataset
+row.names(vehicleDataNum)<-vehicleData[,1]#matches the rownames of the datasets
+
+
+```
+
+
+## Quality Check
+Looking for outliers and batch effects by examining the overall reads per subject and averaging across subject data to see if there are any outliers with low RNA levels.
+In the old data, all Dmi subjects had average reads around 500 while the rest are around 2000 to 3000. This is fixed in the new version of the dataset, that takes into account both rounds of sequencing.
+
+```{r qualityControl}
+
+avgvehicleData<-apply(vehicleDataNum, 2, mean)  
+SDvehicleData<- apply(vehicleDataNum, 2, sd)#caluclates the standard deviation for each subject
+
+SEvehicleData<- SDvehicleData/(sqrt(length(vehicleDataNum[,1])))#Calculates the standard error 
+range(SEvehicleData)
+#standard errors all look good
+
+
+#Examining the sample-sample correlations
+cor<-cor(vehicleDataNum)
+range(cor)
+#correlations look good
+
+#Data looks appropriate to move forward with the analysis
+```
+
+## Data Organization and Annotation
+Remove only the control subjects and then annotate the probe symbols with gene symbols
+
+```{r annotate}
+annotate<-read.csv(paste0(dataDir, "GeneAnnotation_forNewData.csv"))
+colnames(annotate)
+
+#Will be joining annotation data frame with expression data by ENSEMBLID
+
+cont<-grep("CONT", colnames(vehicleData)) #pulls out control subjects
+contVehData<-(vehicleData[cont])
+
+#Add column of ENSEMBLID to vehicle only data 
+contVehData<-cbind.data.frame(ENSEMBLID=vehicleData[,1], contVehData)
+
+contGene <- join(annotate, contVehData, by="ENSEMBLID", type="inner")
+
+```
+
+
+## Normalizing the data
+Average across gene symbols to remove duplicates and then normalize the data by converting to zscores
+
+```{r normalize}
+sum(duplicated(contGene$GeneSymbol))
+
+#Averaging by gene symbol to remove the two duplicate gene symbols
+valueCols <- grep("CONT", colnames(contGene))
+valueCols <- colnames(contGene)[valueCols]
+
+dataAverage <- sapply(valueCols, function(x, frame) {
+  tapply(frame[[x]], frame$GeneSymbol, mean)
+}, frame = contGene)
+
+# Output annotated log data averaged by gene
+write.csv(dataAverage, paste0(outDir, "ContVeh_logdata_avgbygene.csv"))
+
+# get the z-scores
+dataZscore <- t(scale(t(dataAverage), scale = TRUE, center = TRUE))
+dataZscore <- cbind.data.frame(GeneSymbol = row.names(dataAverage),
+                                 dataZscore)
+
+```
+
+
+## Cell Type Analysis
+The following code matches the gene symbols to cell types and get the average of the z-score by cell type for all subjects.
+
+
+```{r cellType}
+
+colnames(cellData)
+
+colnames(cellData)[5]<-"GeneSymbol" 
+
+##joining by GeneSymbol 
+dataCellType <- join(dataZscore, 
+                       cellData, by="GeneSymbol", type="inner") #joining by gene symbol
+
+dim(dataCellType) #checking new dimensions
+
+
+# remove repeating cell types
+noPrimaryOverlap <- lapply(levels(dataCellType$CellType_Primary),
+                           function(x, celltype, gene) {
+                             
+                             # choose all data for a particular primary cell type
+                             tempData <- celltype[which(celltype$CellType_Primary == x), ]
+                             
+                             # get all gene symbols within the current primary cell type
+                             tempGenes <- tempData[[gene]]
+                             
+                             # gene symbols within all toher cell types
+                             otherGenes <- celltype[[gene]][which(celltype$CellType_Primary != x)]
+                             
+                             # now grab the rows which are not in otherGenes
+                             return(tempData[which(!(tempGenes %in% otherGenes)), ])
+                           }, celltype=dataCellType, gene = "GeneSymbol")
+
+# combine the results
+noPrimaryOverlap <- do.call(rbind, noPrimaryOverlap)
+
+# duplicate gene symbols
+sum(duplicated(noPrimaryOverlap$GeneSymbol))
+#Some genes have multiple publications associated with them for the same primary cell type
+
+# remove duplicate gene symbols
+noPrimaryOverlap_nodups<-subset(noPrimaryOverlap, 
+                                !duplicated(noPrimaryOverlap$GeneSymbol))
+
+dim(noPrimaryOverlap_nodups)
+#duplicated genes removed
+
+
+
+#### average over cell types
+valueCols <- colnames(vehicleData[cont]) #subject names
+
+AverageByCellType <- sapply(valueCols, function(x, frame) {
+  tapply(frame[[x]], frame[["CellType_Primary"]], mean, na.rm = TRUE)
+}, frame = noPrimaryOverlap_nodups)
+
+
+head(AverageByCellType) #Checking for accuracy in mean calculation and col/row name assignment
+
+write.csv(as.data.frame(AverageByCellType),
+          paste0(outDir, "AvgByCellType_Vehicle.csv")) #Output of average cell type expression per subject
+
+```
+
+
+## Phenotype Effects on Cell Type
+Add phenotype info to averagebycelltype data then perform ANOVA to observe phenotype effects on cell type expression. Boxplots of Phenotype differences in relative cell type are then generated and printed in-file.
+
+
+```{r phenCell, results='asis'}
+
+ 
+phenotype <- factor(rep(c("HR", "LR"), each=5, length.out=10))
+
+phenEffectCellType <- cbind.data.frame(phenotype, t(AverageByCellType))
+
+head(phenEffectCellType)[1] #checking for correct phenotype assignment
+
+#Running ANOVA
+cNames <- colnames(phenEffectCellType)[2:11]
+
+anovaPhen <- lapply(phenEffectCellType[cNames], function(x, dataFrame) {
+  Anova(lm(x ~ phenotype, data = dataFrame, 
+           contrasts = list(phenotype=contr.sum)), 
+        type = 3)
+  }, dataFrame = phenEffectCellType)
+
+# Store it in matrix form
+CellTypeAnovaPvals <- matrix(0, 10, 1)
+colnames(CellTypeAnovaPvals) <- c("p-value")
+row.names(CellTypeAnovaPvals) <- colnames(phenEffectCellType[2:11])
+
+for (i in 1:10) {
+  CellTypeAnovaPvals[i, ] <- anovaPhen[[i]]$`Pr(>F)`[2]
+}
+
+
+#Output p-values
+write.csv(as.data.frame(CellTypeAnovaPvals),
+          paste0(outDir, "CellTypeAnovaPvals_ContVehicle.csv"))
+
+
+# Printing ANOVA output in file
+for(i in 1:length(anovaPhen)){
+  print(kable(anovaPhen[[i]], caption=names(anovaPhen)[i]))
+}
+
+
+```
+
+Cell Type Boxplots
+
+```{r cellPlot, fig.height=4, fig.width=7}
+
+# plot phenotype effects with box plots
+for (i in 2:length(phenEffectCellType[1,])) {
+  
+  boxplot(phenEffectCellType[[i]] ~ phenEffectCellType$phenotype,
+          ylab = colnames(phenEffectCellType)[i], 
+          main=paste(colnames(phenEffectCellType)[i], "vs Phenotype"),
+          pch=20, col=(i+15), border=(i))
+
+}
+
+
+```
+
+
+# Gene Expression ANOVA 
+The following code adds phenotype information to the zscore gene expression data and performs ANOVA to observe phenotype effect by gene symbol.
+
+
+```{r phenGene}
+
+# keep only the numeric data
+colnames(dataZscore)
+
+#Create numeric object with gene symbols as row names
+temp<-dataZscore[,-1]
+
+row.names(temp)<-dataZscore$GeneSymbol
+
+zscoreByGene_phen <- cbind.data.frame(phenotype, t(temp))
+
+dim(zscoreByGene_phen)
+
+
+head(zscoreByGene_phen)[1:2] #checking for correct phenotype assignment
+
+temp2<-temp[-1,] #One gene symbol has no name so we're removing it
+
+# Now, loop over all genes to get the ANOVA
+anovaOutput <- sapply(row.names(temp2), function(x, frame) {
+  
+  Anova(lm(frame[[x]] ~ phenotype,
+           data = frame,
+           contrasts = c(phenotype = contr.sum)),
+        type = 3)$"Pr(>F)"[2]
+  
+}, frame = zscoreByGene_phen)
+
+phenotypeEffects <- cbind.data.frame("GeneSymbol" = names(anovaOutput),
+                                     "p-value" = anovaOutput)
+
+phenotypeEffectsCellInfo <- join(phenotypeEffects, cellData,
+                                 by="GeneSymbol", type="left")
+
+# write to file
+write.csv(phenotypeEffectsCellInfo,
+          paste0(outDir, "ContVeh_PhenPvals_CellInfo.csv"))
+
+```
+
+
+## T-Test Output for Meta-Analysis
+The following code chunk performs t-tests on phenotype effect by gene, and by average cell type, and creates output files to be used in the gene expression and cell type meta-analyses.
+
+
+```{r ttest}
+
+#Gene expression t-test
+#Take only numeric data 
+colnames(dataAverage)
+
+#First row has no gene symbol name
+dataAverage<-dataAverage[-1,]
+
+length(row.names(dataAverage))
+
+###transposing, adding phenotype info, and running t.test
+logdataphen<-cbind.data.frame(phenotype=phenotype, t(dataAverage))
+
+
+#Run t-test
+
+phenTtests <- sapply(row.names(dataAverage), function(x, frame) {
+  t.test(frame[[x]] ~ phenotype, data = frame)$statistic
+}, frame = logdataphen)
+
+
+# write to file
+phenTtests <- as.data.frame(phenTtests)
+row.names(phenTtests)<-row.names(dataAverage)
+colnames(phenTtests) <- c("t.test")
+
+write.csv(phenTtests, paste0(outDir, "F43_AdultTT.csv"))
+
+
+# Cell type t-tests for meta-analysis
+
+cellTypeTtests<-matrix(0, 10, 1)
+
+for(i in 2:11){
+  cellTypeTtests[i-1,]<-(t.test(phenEffectCellType[,i]~phenotype, data=phenEffectCellType))$statistic
+}
+
+colnames(cellTypeTtests)<-c("t.test")
+row.names(cellTypeTtests)<-colnames(phenEffectCellType[2:11])
+
+
+write.csv(cellTypeTtests, paste0(outDir, "VehCellTypeTT_forMeta.csv"))
+
+
+```
