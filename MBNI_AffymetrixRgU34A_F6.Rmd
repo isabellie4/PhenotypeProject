@@ -1,0 +1,446 @@
+---
+title: "MBNI_AffymetrixRgU34A_F6"
+date: "Microarray development study on P7, P14, and P21 HR/LR"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#knitr::opts_knit$set(root.dir = normalizePath(".."))
+knitr::opts_knit$set(root.dir = "~/Phenotype Project/ibirt")
+```
+
+## Workflow for this file
+We have RMA data for the rat model, HR/LR at three different ages (P7, P14, P21). The brain region analyzed here is the hippocampus. There are six subjects in each age group for both HR and LR. As the pre-processing is already done, this file checks for outliers, normalizes the data, replicates the analysis (phenotype and age effects by gene and cell type), writes the ouput of this analysis and then gets the results of the t-tests for the meta-analysis.
+
+## Loading libraries and data
+```{r loadData, results='hide', warning=FALSE}
+
+library(car)
+library(plyr)
+library(knitr)
+
+dataDir <- "data/MBNI Development Data/"
+outDir <- "output/MBNI Development Data/"
+qcDir <- "qc/MBNI Development Data/"
+
+
+DevelopmentData <- 
+  read.csv(paste0(dataDir, "RMAExpression_customCDF.csv"))
+
+DevelopmentAnnotation <- 
+  read.csv("data/MBNI Development Data/RMAExpression_customCDFAnnotation2.csv")
+
+```
+
+## Checking for outliers
+Here we check for outliers using sample sample correlations and heatmaps on the logged data.
+
+```{r qualityControl, fig.align='center'}
+# first the box plot
+boxplot(DevelopmentData[c(2:37)], cex=0.25, las=3, par(cex.axis=0.75),
+        main="Boxplot of log signal values per sample (1 box=all filtered probes)",
+        xlab="Sample ID", ylab="Log Signal")
+
+# get the log data matrix
+logdatamatrix <- as.matrix(DevelopmentData[,-1])
+
+# the sample sample correlation matrix
+logdataCormatrix <- cor(logdatamatrix)
+
+# Save it
+write.csv(logdataCormatrix, paste0(qcDir, "logdataCormatrix.csv"))
+
+# visualize the correlation matrix
+heatmap(logdataCormatrix)
+
+```
+
+Looks good overall, don't see any outliers. So, moving on.
+
+## Annotate the data
+Join the annotation file to the dataframe
+
+
+```{r annotate}
+LogdataAnnotated <- join(DevelopmentAnnotation,
+                                     DevelopmentData, by="ProbesetID", type="full")
+
+
+# check for duplicate gene symbols which are not NA
+any(
+  duplicated(
+    LogdataAnnotated$GeneSymbol[!is.na( LogdataAnnotated$GeneSymbol)]
+    )
+  )
+
+#so, there are no duplicates. We can remove the NA's then
+LogdataAnnotatednoNA <- LogdataAnnotated[which(!is.na(LogdataAnnotated$GeneSymbol)), ]
+
+```
+
+
+## Normalize the data
+Next we center and scale the data, basically getting the Z-scores for the data.
+
+```{r normalize}
+
+
+row.names(LogdataAnnotatednoNA) <- LogdataAnnotatednoNA$GeneSymbol
+colnames(LogdataAnnotatednoNA)
+
+valueCols <- grep("gz", colnames(LogdataAnnotatednoNA))
+valueCols <- colnames(LogdataAnnotatednoNA)[valueCols]
+
+dataZscore <- t(scale(t(LogdataAnnotatednoNA[valueCols]), center = TRUE, scale = TRUE))
+
+
+```
+
+As there are no duplicates, we don't need to average by gene symbol.
+
+
+## Add the factors for Phenotype and Age
+Adding the factors to the Z-score data which was annotated above.
+
+```{r addPhenotype}
+# Want only numeric data, dataZscore is all numeric because gene symbols are row.names
+dim(dataZscore)
+
+# transpose, so that the columns are now the different genes
+ZscoreDataPhenAge <- t(dataZscore)
+
+# create phenotype and age as factors
+Phenotype <- as.factor(rep(c("HR", "LR"), each=18, length.out=36))
+
+Age <- factor(rep(c("P7", "P14", "P21"), each=6, time=2, length.out=36),
+              levels=c("P7", "P14", "P21"), ordered=TRUE)
+
+# Add to the data frame
+ZscoreDataPhenAge <- cbind.data.frame(phenotype=Phenotype, age=Age,
+                                      ZscoreDataPhenAge)
+```
+
+## Analysis
+Getting started with the analysis. This is split into two parts. The first is an Anova of a linear model on which the Z-score of a particular gene is regressed on age and phenotype. There are 4588 genes. The p-values obtained are stored in the output file "PhenotypeAgeEffectByGene_Pvals.csv".
+
+```{r analysisGene}
+# Create the results matrix. Subtract 2 because the first two 
+# columns are phenotype and age
+PhenotypeAgeEffects <- matrix(0, 3,
+                              length(ZscoreDataPhenAge) - 2)
+
+# regression of each column (gene expression value) on phenotype and age.
+# The p-values from the anova are then saved in the result matrix
+for (i in 3:length(ZscoreDataPhenAge)) {
+  PhenotypeAgeEffects[,i-2] <- Anova(lm(ZscoreDataPhenAge[,i] ~ phenotype * age,
+                                        data=ZscoreDataPhenAge,
+                                        contrasts=c(phenotype=contr.sum, age=contr.sum)), #originally used contr.poly for age, but in other analyses contr.sum is used. Will keep consistent.
+                                     type = 3)$"Pr(>F)"[2:4]
+}
+
+# add the column names for each gene and row names for p-values
+colnames(PhenotypeAgeEffects) <- colnames(ZscoreDataPhenAge)[-c(1, 2)]
+row.names(PhenotypeAgeEffects) <- c("Phenotype", "Age", "Phenotype*Age")
+
+PhenotypeAgeEffects <- t(PhenotypeAgeEffects)
+
+# Save it to a csv file
+write.csv(PhenotypeAgeEffects, paste0(outDir, "PhenotypeAgeEffectByGene_Pvals.csv"))
+
+```
+
+### Phenotype effects by age group
+The next part of the analysis looks at phenotype effects for each age group. The data is subset by age group and a similar analysis to the one above is conducted.
+
+```{r analysisPhenotype}
+#Subset the data by age
+ageList <- split(ZscoreDataPhenAge, ZscoreDataPhenAge$age)
+
+
+#Run ANOVA of phenotype effects on gene expression for each separate age group
+outputByAge <- lapply(ageList, function(x) {
+  out <- matrix(0, (length(x) - 2), 1)
+  
+  for (i in 3:length(x)) {
+    out[i-2,] <- Anova(lm(x[,i] ~ phenotype, data = x,
+                          contrasts=c(phenotype=contr.sum)),
+                       type = 3)$"Pr(>F)"[2]
+  }
+  
+  row.names(out) <- colnames(x)[-c(1, 2)]
+  colnames(out) <- c("Phenotype")
+  
+  out
+})
+
+# Write the output to csv files
+tempOut <- sapply(names(outputByAge), function(x, outputByAge) {
+  write.csv(outputByAge[[x]],
+            paste0("output/MBNI Development Data/PhenotypeAgeEffects",
+                   x, ".csv"))
+}, outputByAge = outputByAge)
+
+```
+
+### Some boxplots for the genes
+Boxplots for Cadm1 and Bmp4
+
+```{r boxPlots, fig.width=7, fig.height=4}
+
+boxplot(ZscoreDataPhenAge$Cadm1~phenotype*age, data=ZscoreDataPhenAge,
+        main="Cadm1 Expression Across HR/LR Development", las=3)
+
+boxplot(ZscoreDataPhenAge$Bmp4~phenotype*age, data=ZscoreDataPhenAge,
+        main="Bmp4 Expression Across HR/LR Development", las=3)
+
+
+# Save the boxplots
+png("output/MBNI Development Data/Cadm1.png")
+boxplot(ZscoreDataPhenAge$Cadm1~phenotype*age, data=ZscoreDataPhenAge,
+        main="Cadm1 Expression Across HR/LR Development", las=3)
+dev.off()
+
+png("output/MBNI Development Data/Bmp4.png")
+boxplot(ZscoreDataPhenAge$Bmp4~phenotype*age, data=ZscoreDataPhenAge,
+        main="Bmp4 Expression Across HR/LR Development", las=3)
+dev.off()
+
+
+```
+
+## Cell Type Analysis
+The first code chunk uses the CellTypeSpecificGenes_Master3 file in order to map the genes to specific cell types. After the mapping the values are averaged by primary cell type.
+
+```{r cellTypePre}
+
+CellTypeSpecificGenes_Master3 <- read.csv("data/CellTypeSpecificGenes_Master3.csv")
+colnames(CellTypeSpecificGenes_Master3)[5] <- "GeneSymbol"
+
+#joining zscore data with cell type data
+
+#adding column of GeneSymbol to dataZscore for joining
+tojoin<-cbind.data.frame(GeneSymbol=row.names(dataZscore), dataZscore)
+
+
+DevelopmentData_CellTypeinfo <- join(tojoin,
+                                     CellTypeSpecificGenes_Master3,
+                                     by="GeneSymbol", type="inner")
+
+
+
+# remove repeating cell types
+noPrimaryOverlap <- lapply(levels(DevelopmentData_CellTypeinfo$CellType_Primary),
+                           function(x, celltype) {
+  
+  # choose all data for a particular primary cell type
+  tempData <- celltype[which(celltype$CellType_Primary == x), ]
+  
+  # get all gene symbols within the current primary cell type
+  tempGenes <- tempData$GeneSymbol
+  
+  # gene symbols within all toher cell types
+  otherGenes <- celltype$GeneSymbol[which(celltype$CellType_Primary != x)]
+  
+  # now grab the rows which are not in otherGenes
+  return(tempData[which(!(tempGenes %in% otherGenes)), ])
+}, celltype = DevelopmentData_CellTypeinfo)
+
+# combine the results
+noPrimaryOverlap <- do.call(rbind, noPrimaryOverlap)
+
+# some genes are duplicated
+sum(duplicated(noPrimaryOverlap$GeneSymbol))
+
+#Removing duplicate genes
+noPrimaryOverlap<-subset(noPrimaryOverlap, 
+                         !duplicated(noPrimaryOverlap$GeneSymbol))
+
+# average over cell types
+avgCellType <- sapply(valueCols, function(x, frame) {
+  tapply(frame[[x]], frame[["CellType_Primary"]], mean, na.rm = TRUE)
+}, frame = noPrimaryOverlap)
+
+
+
+########Adding in factors (Age and Phenotype)
+FactorEffectsonCellType <- t(avgCellType)
+
+###Phenotype: First 18 are HR second 18 are LR
+###Age: 6 P7, 6 P14, 6 P21 and repeat
+#NOTE: should run first as character and then maybe code as numeric later so age can be seen as linear
+
+FactorEffectsonCellType <- cbind.data.frame(Phenotype = Phenotype, Age = Age,
+                                                 FactorEffectsonCellType)
+
+
+```
+
+### Cell type graphs
+The following graphs show boxplots of phenotype and age effects.
+
+```{r celltypeGraphs, fig.height=4, fig.width=7}
+
+#runs the forloopover every cell type
+for (i in 3:12){
+  boxplot(FactorEffectsonCellType[,i] ~ FactorEffectsonCellType$Phenotype,
+          ylab = colnames(FactorEffectsonCellType)[i],
+          main = paste(colnames(FactorEffectsonCellType)[i], "vs",
+                       colnames(FactorEffectsonCellType)[1]),
+          col = (i+15), border = (i+10), pch = 20)
+  
+  boxplot(FactorEffectsonCellType[,i] ~ FactorEffectsonCellType$Age,
+          ylab = colnames(FactorEffectsonCellType)[i],
+          main = paste(colnames(FactorEffectsonCellType)[i], "vs",
+                       colnames(FactorEffectsonCellType)[2]),
+          col = (i+15), border = (i+10), pch = 20)
+  
+  boxplot(FactorEffectsonCellType[,i] ~ FactorEffectsonCellType$Age +
+            FactorEffectsonCellType$Phenotype,
+          ylab = colnames(FactorEffectsonCellType)[i],
+          main = paste(colnames(FactorEffectsonCellType)[i],
+                       "vs Age and Phenotype"),
+          col = (i+15), border = (i+10), pch = 20)
+
+}
+```
+
+### Cell type ANOVA
+Getting the results of the ANOVA of phenotype and age effects for each of the ten cells.
+
+```{r anovaCelltype, results = 'asis'}
+cNames <- colnames(FactorEffectsonCellType)[3:12]
+
+anovaPhen <- lapply(FactorEffectsonCellType[cNames], function(x, dataFrame) {
+  Anova(lm(x ~ Phenotype * Age, data = dataFrame, 
+           contrasts = list(Phenotype=contr.sum, Age=contr.sum)), 
+        type = 3)
+  }, dataFrame = FactorEffectsonCellType)
+
+# Store it in matrix form
+CellTypeAnovaPvals <- matrix(0, 10, 3)
+colnames(CellTypeAnovaPvals) <- c("Phenotype", "Age", "Phenotype:Age")
+row.names(CellTypeAnovaPvals) <- colnames(FactorEffectsonCellType[3:12])
+
+for (i in 1:10) {
+  CellTypeAnovaPvals[i, ] <- anovaPhen[[i]]$`Pr(>F)`[2:4]
+}
+
+# Save it
+write.csv(CellTypeAnovaPvals, 
+          paste0(outDir, "CellTypeANOVApvals.csv"))
+
+# Printing ANOVA output in file
+for(i in 1:length(anovaPhen)){
+  print(kable(anovaPhen[[i]], caption=names(anovaPhen)[i]))
+}
+
+```
+
+## Direction of effects
+The next code chunk first joins the celltype data with the p-values and then annotates the log data (before the Z-scores were calculated) in order to get the direction of effects.
+
+```{r directionEffects}
+
+# Join celltype data with p-values
+PhenotypeAgeEffectstojoin <- cbind.data.frame(GeneSymbol=row.names(PhenotypeAgeEffects),
+                                               PhenotypeAgeEffects)
+
+PvalsandCellInfo <- join(PhenotypeAgeEffectstojoin, CellTypeSpecificGenes_Master3,
+                         by="GeneSymbol", type="left")
+
+
+#Subsetting numeric log data data and adding age and phenotype info
+Developmentdatanum <- (LogdataAnnotatednoNA)[valueCols]
+
+Developmentdatanum <- t(Developmentdatanum)
+Developmentdataphen <- cbind.data.frame(Phenotype=Phenotype, Age=Age,
+                                        Developmentdatanum)
+#Direction of Effects
+#dimensions
+#[1]   36 4590
+
+# Take the mean for each phenotype for each gene
+Phen_mean <- matrix(0, 2, length(Developmentdataphen) - 2)
+for (i in 3:length(Developmentdataphen)){
+  Phen_mean[,i-2] <- tapply(Developmentdataphen[,i], Developmentdataphen$Phenotype, mean)
+}
+
+row.names(Phen_mean) <- c("HR mean", "LR mean")
+colnames(Phen_mean) <- colnames(Developmentdataphen)[-c(1, 2)]
+
+Phen_mean <- t(Phen_mean)
+
+# Joining with pval and cell type info for complete info dataset
+temp <- cbind.data.frame(GeneSymbol=row.names(Phen_mean), Phen_mean)
+AllInfoDevelopment <- join(temp, PvalsandCellInfo,
+                           by="GeneSymbol", type="inner")
+
+write.csv(AllInfoDevelopment,
+          paste0(outDir, "AllAnalysisInfo_DevelopmentData.csv"))
+
+```
+
+## T-Tests for Meta-analysis
+The following code chunk does the t-tests for both the gene expression and the cell type data for meta-analysis.
+
+
+```{r metaTtests}
+#subsetting the age groups
+developmentDatabyAge <- split(Developmentdataphen, Developmentdataphen$Age)
+
+developmentTtests <- lapply(developmentDatabyAge, function(x) {
+  out <- matrix(0, length(x) - 2, 1)
+  
+  # The first two columns are Phenotype and Age
+  for(i in 3:length(x)) {
+    out[i-2, ] <- t.test(x[,i] ~ Phenotype, data = x)$statistic
+  }
+  
+  row.names(out) <- colnames(x)[-c(1, 2)]
+  colnames(out) <- "t.test"
+  
+  out
+})
+
+
+#output for all t.tests
+write.csv(developmentTtests[[1]], paste0(outDir, "DevelopmentP7TT.csv"))
+write.csv(developmentTtests[[2]], paste0(outDir, "DevelopmentP14TT.csv"))
+write.csv(developmentTtests[[3]], paste0(outDir, "DevelopmentP21TT.csv"))
+
+```
+
+### Cell type T-tests
+Code for the cell type t-tests analysis.
+
+```{r cellTypeTtest}
+
+#subsetting the age groups
+CelldataP7 <- subset(FactorEffectsonCellType,
+                   FactorEffectsonCellType$Age=="P7")
+CelldataP14 <- subset(FactorEffectsonCellType,
+                      FactorEffectsonCellType$Age=="P14")
+CelldataP21 <- subset(FactorEffectsonCellType,
+                      FactorEffectsonCellType$Age=="P21")
+
+DevelopmentCellTypeTT_forMeta<-matrix(0, 10, 3)
+
+for(i in 3:12){
+  DevelopmentCellTypeTT_forMeta[i-2, 1] <- (t.test(CelldataP7[,i] ~ Phenotype,
+                                                   data = CelldataP7))$statistic
+  DevelopmentCellTypeTT_forMeta[i-2, 2] <- (t.test(CelldataP14[,i] ~ Phenotype,
+                                                   data = CelldataP14))$statistic
+  DevelopmentCellTypeTT_forMeta[i-2, 3] <- (t.test(CelldataP21[,i] ~ Phenotype,
+                                                   data = CelldataP21))$statistic
+}
+
+colnames(DevelopmentCellTypeTT_forMeta)<-c("P7 TT", "P14 TT", "P21 TT")
+row.names(DevelopmentCellTypeTT_forMeta)<-colnames(FactorEffectsonCellType[3:12])
+
+write.csv(DevelopmentCellTypeTT_forMeta, 
+          paste0(outDir, "DevelopmentCellTypeTT_forMeta.csv"))
+
+
+```
+
