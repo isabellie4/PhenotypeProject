@@ -1,10 +1,10 @@
 # PhenotypeProject
 
 Script containing the updated adult meta-analysis.
-– Adult Meta-Analysis.R
+  - Adult Meta-Analysis.R
 
-Development meta-analysis code for P7, P14, and P21.  
-– MetaAnalysis_Development.R
+Development meta-analysis code for P7, P14, and P21.
+  - MetaAnalysis_Development.R
 
 FGSEA script containing the code used to run fgsea on adult and P14 meta-analysis genes. 
 Also contains code for generating custom GMT files from several co-expression studies and running fgsea using these gene set files.
@@ -36,5 +36,5 @@ Dr. Sarah Clinton P14 Affy. Sarah Clinton’s basal P14 data performed on an Aff
 Data requires annotation so multiple input files are needed. 
 - MBNI_AﬀymetrixRae230_ F15.Rmd
 
-Sarah Clinton P14 Illumina. Sarah Clinton’s basal P14 data performed on an Illumina platform. 
-- MBNI_IlluminaRatRef12v1_F15.Rmd
+Sarah Clinton P14 Illumina. Sarah Clinton’s basal P14 data performed on an Illumina platform.
+  - MBNI_IlluminaRatRef12v1_F15.Rmd
