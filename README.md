@@ -1,5 +1,7 @@
 # PhenotypeProject
 
+### All the code used to perform the meta-analysis and subsequent analyses on basal differences between the HR and LR rats.
+
 Script containing the updated adult meta-analysis.
   - Adult Meta-Analysis.R
 
@@ -10,7 +12,7 @@ FGSEA script containing the code used to run fgsea on adult and P14 meta-analysi
 Also contains code for generating custom GMT files from several co-expression studies and running fgsea using these gene set files.
   - fgsea.R
 
-Individual dataset re-analysis (7 total – the old RNA-Seq study was not re-analyzed)
+##### Individual dataset re-analysis (7 total – the old RNA-Seq study was not re-analyzed)
 
 Dr. Sarah Clinton New Colony data obtained from Gene Expression Omnibus Website. Contains data for P7, P14, P21, and adult basal rats. 
 Only dataset not from our lab. Because the data was obtained online, it is raw data and requires additional processing and annotation. 
