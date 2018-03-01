@@ -1,0 +1,392 @@
+---
+title: "MBNI_RNASeq_F37"
+date: "RNA-seq study on adult HR/LR"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Phenotype Project/ibirt")
+```
+
+
+The file includes code for the re-analysis of Dr. Peter Blandino's adult basal data set. The data set is from log base 2 transformed data that has already been filtered and normalized.The data includes adult HR, IR, and LR rats, but IR subjects are removed and the analysis proceeds using only HR and LR.
+
+
+```{r loadData}
+
+library(car)
+library(plyr)
+library(knitr)
+
+dataDir <- "data/Blandino RNAseq F37/"
+outDir <- "output/Blandino RNAseq F37/"
+qcDir <- "qc/Blandino RNAseq F37/"
+
+
+blandinodata <- read.csv(paste0(dataDir,
+                                  "LowerCase_Akil5_geneexp_filteredandnormalized_log2fpm.csv"))
+
+```
+
+## Removing IR subjects
+This code chunk removes IR subjects since they are not needed for the meta-analysis
+
+```{r removeIR}
+
+colsIR<-(grep("IR", colnames(blandinodata)))
+BlandinoHR_LRdata<-blandinodata[ , !(colnames(blandinodata) %in% colnames(blandinodata)[colsIR])]
+
+```
+
+#Data quality check
+Checks standard deviation and standard error for each subject
+
+```{r quality check}
+
+SDBlandinodata<- apply(BlandinoHR_LRdata[,c(2:13)], 2, sd)#caluclates the standard deviation for each subject, 2 refers to columns, sd = standard deviation
+SEBlandinodata<- SDBlandinodata/(sqrt(length(BlandinoHR_LRdata[,1])))#Calculates the standard error 
+range(SEBlandinodata)
+
+#standard errors all look good
+
+```
+
+#Outlier check
+Quality Control boxplot to observe subject expression distribution
+
+```{r qcboxplot, fig.align='center', fig.width=7}
+
+boxplot(data.frame(BlandinoHR_LRdata[c(2:13)]), cex=0.25, las=3, par(cex.axis=0.75), main="Boxplot of log signal values per sample (1 box=all filtered probes)", xlab="Sample ID", ylab="Log Signal")
+#Range and median for each subject looks roughly the same, does not appear to be any outliers
+
+```
+
+Sample-sample correlation
+
+```{r correlations}
+
+BlandinoHR_LRdataNum<-BlandinoHR_LRdata[,-1] #making data numeric by removing gene name column
+
+dim(BlandinoHR_LRdataNum) #checking dimensions (should be one less column)
+
+temp<-cor(BlandinoHR_LRdataNum)#running correlation across all subjects
+range(temp)
+#That's pretty good, correlations are all .96 or higher.
+
+```
+
+Done checking data quality
+
+
+## Normalizing data
+
+The following code chunk checks for gene symbol duplicates (there are 2), and averages by gene symbol to remove these duplications. It then scales and centers the data. 
+
+
+```{r normalize}
+
+#Checking for duplicate gene symbols
+sum(duplicated(BlandinoHR_LRdata$Gene))
+
+#Averaging by gene symbol to remove the two duplicate gene symbols
+Averagebygenesymbol<-matrix(0, length(names(table(BlandinoHR_LRdata[,1]))), 12)
+for(i in 2:13){#the forloop runs over every column of data and calculates the mean by gene symbol:
+  Averagebygenesymbol[,i-1]<-tapply(BlandinoHR_LRdata[,i], BlandinoHR_LRdata[,1], function(y) mean(y))
+}
+
+colnames(Averagebygenesymbol)<-colnames(BlandinoHR_LRdataNum) #Assigning subject names to columns
+row.names(Averagebygenesymbol)<-(names(table(BlandinoHR_LRdata[,1]))) #Assigning gene names as row names
+dim(Averagebygenesymbol) #checking dimensions
+
+
+## Scaling and Centering to convert data to zscores
+
+Averagebygenesymbol_zscore<-t(scale(t(Averagebygenesymbol), center=TRUE, scale=TRUE))
+
+dim(Averagebygenesymbol_zscore)
+
+
+```
+
+
+## Data export for meta-analysis 
+T-test for Peter Blandino's data is performed in the meta-analysis script. This code chunk exports the data used: log2 transformed data with duplicate genes removed (not zscored)
+
+
+```{r metadata}
+
+write.csv(Averagebygenesymbol, 
+          paste0(outDir, "BlandinoONLYHRLR_logALLGENES.csv"))
+```
+
+
+## Cell Type Analysis
+
+The following code matches the gene symbols to cell types and gets the average of the z-score by cell type for all HR, IR, and LR adult rats.
+
+
+```{r cell type}
+
+#reading in cell type info
+
+CellTypeInfo<-read.csv("data/CellTypeSpecificGenes_Master3.csv")
+colnames(CellTypeInfo)
+
+
+colnames(CellTypeInfo)[5]<-"Gene" #Renaming the mouse gene symbol column so it can be easily joined with the expression data
+
+##Adding col of Gene to AveragebygenesymbolPeterHRLR_zscore for joining
+Averagebygenesymboltojoin<-cbind.data.frame(Gene=row.names(Averagebygenesymbol_zscore), Averagebygenesymbol_zscore)
+
+##joining by gene symbol 
+
+Averagebygenesymbol_Cellinfo<-join(Averagebygenesymboltojoin, CellTypeInfo, by="Gene", type="inner") #joining by gene symbol
+
+dim(Averagebygenesymbol_Cellinfo) #checking new dimensions
+
+
+
+# remove repeating cell types
+noPrimaryOverlap <- lapply(levels(Averagebygenesymbol_Cellinfo$CellType_Primary),
+                           function(x, celltype, gene) {
+                             
+                             # choose all data for a particular primary cell type
+                             tempData <- celltype[which(celltype$CellType_Primary == x), ]
+                             
+                             # get all gene symbols within the current primary cell type
+                             tempGenes <- tempData[[gene]]
+                             
+                             # gene symbols within all toher cell types
+                             otherGenes <- celltype[[gene]][which(celltype$CellType_Primary != x)]
+                             
+                             # now grab the rows which are not in otherGenes
+                             return(tempData[which(!(tempGenes %in% otherGenes)), ])
+                           }, celltype=Averagebygenesymbol_Cellinfo, gene = "Gene")
+
+# combine the results
+noPrimaryOverlap <- do.call(rbind, noPrimaryOverlap)
+
+# duplicate gene symbols
+sum(duplicated(noPrimaryOverlap$Gene))
+#Some genes have multiple publications associated with them for the same primary cell type
+#I doubt it affects the results much, but I will remove these genes so that they do not give false values for cell type expression for cell types with lots of duplicated genes
+
+# Subsetting non-duplicated genes, should be fine since all the expression values for the duplicated genes are the same
+noPrimaryOverlap_nodups<-subset(noPrimaryOverlap, 
+                                !duplicated(noPrimaryOverlap$Gene))
+
+dim(noPrimaryOverlap_nodups)
+#duplicated genes removed
+
+
+
+#### average over cell types
+valueCols <- colnames(BlandinoHR_LRdataNum) #subject names
+
+AverageByCellType <- sapply(valueCols, function(x, frame) {
+  tapply(frame[[x]], frame[["CellType_Primary"]], mean, na.rm = TRUE)
+}, frame = noPrimaryOverlap_nodups)
+
+
+head(AverageByCellType) #Checking for accuracy in mean calculation and col/row name assignment
+
+```
+
+## Phenotype Effects on Cell Type
+The following code chunk creates a cell type average file with phenotype information and analyzes effect of phenotype on cell type through ANOVA. It then creates boxplots of phenotype effects on each cell type.
+
+```{r phencelltype, fig.align='center', fig.width=7, fig.height=4}
+
+HRLR_PhenEffects<-t(AverageByCellType)#Transposing averaged cell type dataset so that subjects are now rows and cell types are columns
+
+#adding Phenotype column
+Phen<-as.factor(rep(c("HR", "LR"), each=6, length.out=12)) #Creating phenotype factor
+HRLR_PhenEffects<-cbind.data.frame(Phenotype=Phen, HRLR_PhenEffects) 
+
+
+#Phenotype effect Boxplots
+
+for (i in 2:length(row.names(AverageByCellType))) {
+  
+  boxplot(HRLR_PhenEffects[[i]] ~ HRLR_PhenEffects$Phenotype,
+          ylab = row.names(AverageByCellType)[i], 
+          main=paste(row.names(AverageByCellType)[i], "vs Phenotype"),
+          col=(i+6), border=(i), pch=20)
+  
+}
+
+
+```
+
+## Cell Type ANOVA
+observing effects of phenotype on average cell type expression through ANOVA
+
+Now moving on to the phenotype ANOVA. Will print this in-file and save the p-values.
+
+```{r phenAnova, results='asis'}
+
+cNames <- colnames(HRLR_PhenEffects)[2:11]
+
+anovaPhen <- lapply(HRLR_PhenEffects[cNames], function(x, dataFrame) {
+  Anova(lm(x ~ Phenotype, data = dataFrame, 
+           contrasts = list(Phenotype=contr.sum)), 
+        type = 3)
+  }, dataFrame = HRLR_PhenEffects)
+
+# Store it in matrix form
+CellTypeAnovaPvals <- matrix(0, 10, 1)
+colnames(CellTypeAnovaPvals) <- c("p-value")
+row.names(CellTypeAnovaPvals) <- colnames(HRLR_PhenEffects[2:11])
+
+for (i in 1:10) {
+  CellTypeAnovaPvals[i, ] <- anovaPhen[[i]]$`Pr(>F)`[2]
+}
+
+# Save it
+write.csv(CellTypeAnovaPvals, 
+          paste0(outDir, "CellTypeAnovaPvals_BlandinoRNAseq.csv"))
+
+# Now, anovaPhen has all the ANOVA stuff. Print it.
+for(i in 1:length(anovaPhen)){
+  print(kable(anovaPhen[[i]], caption=names(anovaPhen)[i]))
+}
+
+
+```
+
+
+### Gene Expression ANOVA 
+ANOVA of phenotype effect on gene expression for all genes in HR/LR subjects
+
+```{r geneANOVA}
+
+#creating dataframe with phenotype info as first row
+OnlyHRLR_ALLGENES<-cbind.data.frame(Phenotype=Phen,
+                                         t(Averagebygenesymbol))
+
+#Creating empty matrix for ANOVA
+PhenotypePvalsHRLRALLGENES<-matrix(0, ncol=1, nrow=20907)
+
+for(i in 2:20908){
+  PhenotypePvalsHRLRALLGENES[i-1,]<-Anova(lm(OnlyHRLR_ALLGENES[,i]~Phenotype,
+                                                  data=OnlyHRLR_ALLGENES,
+                                                  
+                                                  contrasts=list(Phenotype=contr.sum)),
+                                               
+                                                  type=3)$"Pr(>F)"[2]
+                                   }
+
+#Assigning gene symbols to row names
+row.names(PhenotypePvalsHRLRALLGENES)<-colnames(OnlyHRLR_ALLGENES[2:20908])
+
+#double checking for correctness
+PhenotypePvalsHRLRALLGENES[1,]
+
+#Running ANOVA on 3/1/2016 gene
+Anova(lm(OnlyHRLR_ALLGENES$`3/1/2016`~Phenotype, data=OnlyHRLR_ALLGENES,
+         contrasts=list(Phenotype=contr.sum)), type=3)$"Pr(>F)"[2]
+
+
+```
+
+
+##Obtaining Direction of Effects for HR and LR phenotypes
+This code chunks averages across gene expression for all HR/LR subjects to get an overall gene expression average by phenotype
+
+
+```{r doe}
+dim(OnlyHRLR_ALLGENES)
+
+Phen_mean<-matrix(0, ncol=2, nrow=20907)
+for(i in 2:length(OnlyHRLR_ALLGENES)){
+  Phen_mean[i-1,]<-tapply(OnlyHRLR_ALLGENES[,i], 
+                          as.character(OnlyHRLR_ALLGENES$Phenotype), mean) 
+  
+  #treating phenotype as character so only HR and LR are included (removing IR factor level)
+            }
+
+#Checking
+tapply(OnlyHRLR_ALLGENES[,2], as.character(OnlyHRLR_ALLGENES$Phenotype), mean)
+
+#Assigning col names
+colnames(Phen_mean)<-c("HR mean", "LR mean")
+
+#Assigning row names = genes
+row.names(Phen_mean)<-colnames(OnlyHRLR_ALLGENES)[2:20908]
+
+```
+
+
+## Data Analysis Export
+This final data chunk extracts the non-overlapping cell type info and then adds the gene symbols, phenotype, direction of effect, and cell type information into one file and exports it
+
+```{r dataexport}
+#Taking out non-overlapping cell types from previous object
+colnames(noPrimaryOverlap_nodups)
+         
+
+CellInfo<-cbind.data.frame(noPrimaryOverlap_nodups[,c(1, 14:26)]) 
+#Extract only Gene symbol and Cell Type info columns
+
+
+#Adding row of gene symbols to be joined with cell info
+#Adding phenotype p-values into temp file
+temp<-cbind.data.frame(Gene=row.names(Phen_mean),
+                       'phen p-value'=PhenotypePvalsHRLRALLGENES[,1],
+                       Phen_mean)
+
+
+#Adding cell info to temp file
+phenEffects_CellInfo<-join(temp, CellInfo, by="Gene", type="left")
+
+
+#Exporting final .csv analysis file for Peter Blandino Basal data using only HR and LR data
+
+write.csv(phenEffects_CellInfo, 
+          paste0(outDir, "Blandino_Phen_pvalue_DOE_ALLGENES_cellinfo.csv"))
+
+```
+
+
+## T-tests for meta-analysis
+
+The following code chunk does the t-tests for the meta-analysis and writes the results to a file.
+
+```{r metaAnalysis}
+
+colnames(Averagebygenesymbol)
+
+
+dataLog <- cbind.data.frame(phenotype=Phen, t(Averagebygenesymbol))
+
+phenTtests <- sapply(row.names(Averagebygenesymbol), function(x, frame) {
+  
+  t.test(frame[[x]] ~ phenotype, data = frame)$statistic
+  
+}, frame = dataLog)
+
+# write to file
+phenTtests <- as.data.frame(phenTtests)
+row.names(phenTtests) <-row.names(Averagebygenesymbol)
+colnames(phenTtests) <- c("t-test")
+
+write.csv(phenTtests, paste0(outDir, "BlandinoTT.csv"))
+
+# Cell type t-tests for meta-analysis
+
+cellTypeTtests <- sapply(colnames(HRLR_PhenEffects)[-1], function(x, frame) {
+  
+  t.test(frame[[x]] ~ Phenotype, data = frame)$statistic
+  
+}, frame = HRLR_PhenEffects)
+
+cellTypeTtests <- as.data.frame(cellTypeTtests)
+row.names(cellTypeTtests) <- colnames(HRLR_PhenEffects)[-1]
+colnames(cellTypeTtests) <- c("t-test")
+
+write.csv(cellTypeTtests,
+          paste0(outDir, "BlandinoCellTypeTT_forMeta.csv"))
+
+```
+
