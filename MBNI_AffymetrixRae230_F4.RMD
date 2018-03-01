@@ -1,0 +1,441 @@
+---
+title: "MBNI_AffymetrixRae230_F4"
+date: "Microarray study on adult HR/LR"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/Phenotype Project/ibirt")
+```
+
+This file includes code for re-analyzing the dataset of 6 HR and LR adult rats from a study performed by Dr. John Stead. The data is in CEL format and must be normalized, checked for quality, and annotated before being analyzed. A custom cdf is used for annotation.
+
+Before Running, be sure that the appropriate affymetrix packages are installed.
+
+
+```{r loadLibraries, echo=TRUE, results='hide'}
+
+#This is where I obtained the updated custom .cdf for defining the probesets:
+#http://nmg-r.bioinformatics.nl/NuGO_R.html
+
+# "Annotation libraries for the MBNI Custom CDF annotation files (mirrored from MBNI; VERSION 19.0.0 Updated November 2015 / Bioconductor 3.2. Here, also the CDF and PROBE libraries are available for download.To obtain full microarray support, you need to download and install all three libraries for each chip!"
+
+library(org.Rn.eg.db)
+library(plyr)
+library(car)
+library(knitr)
+
+
+#Make sure packages are installed
+
+#install.packages("C:/Users/Izzy/Downloads/rae230arnentrezg.db_19.0.2.zip", repos = NULL, type = "win.binary")
+#install.packages("C:/Users/Izzy/Downloads/rae230arnentrezgcdf_19.0.0.zip", repos = NULL, type = "win.binary")
+#install.packages("C:/Users/Izzy/Downloads/rae230arnentrezgprobe_19.0.0.zip", repos = NULL, type = "win.binary")
+
+
+#library(rae230arnentrezg.db)
+#library(rae230arnentrezgcdf)
+#library(rae230arnentrezgprobe)
+
+
+source("https://bioconductor.org/biocLite.R")
+biocLite("affy")
+library("affy")
+
+
+```
+
+Reading in the .CEL files containing gene expression data
+
+``` {r loadData}
+
+#Create directories
+dataDir <- "data/Stead .CEL files/"
+outDir <- "output/Stead Affy F4/"
+qcDir <- "qc/Stead Affy F4/"
+
+#Read .CEL files
+data2<-ReadAffy(cdfname = "rae230arnentrezgcdf", celfile.path=("data/Stead .CEL files/"))
+
+eset2 <- rma(data2)
+
+#output customCDF
+write.exprs(eset2,file="output/Stead Affy F4/data_customCDF.txt")
+
+#Read in custom CDF so that it is in correct format
+RMAExpression_customCDF<-read.delim("output/Stead Affy F4/data_customCDF.txt", sep="\t")
+
+
+```
+
+
+#Creating Annotation File
+The following code chunk creates the custom cdf used to map entrez ID to their respective gene symbols in order to assign gene symbols to the data
+
+
+``` {r cdf}
+
+head(RMAExpression_customCDF)
+
+#Added "_at" at end of annotation needs to be removed
+RMAExpression_EntrezID<-sub("_at", "", RMAExpression_customCDF[,1])
+head(RMAExpression_EntrezID)
+
+
+RMAExpression_customCDFAnnotation<-data.frame(RMAExpression_customCDF[,1], RMAExpression_EntrezID, stringsAsFactors = F )
+
+colnames(RMAExpression_customCDFAnnotation)<-c("ProbesetID", "EntrezGeneID")
+head(RMAExpression_customCDFAnnotation)
+
+
+#Getting Gene Symbols:
+x <- org.Rn.egSYMBOL
+mapped_genes <- mappedkeys(x)
+xx <- as.list(x[mapped_genes])
+
+#Checking structure
+xx[1]
+
+#Assigning GeneSymbols to EntrezID
+GeneSymbol<-unlist(xx, use.names=FALSE)
+EntrezGeneID<-rep(names(xx), lengths(xx))
+
+table(lengths(xx))
+
+#There's a 1:1 mapping of gene symbol and entrez ID
+
+EntrezVsGeneSymbol<-data.frame(EntrezGeneID, GeneSymbol, stringsAsFactors=F)
+
+
+#Joining Gene symbol annotation with ProbesetID
+RMAExpression_customCDFAnnotation2<-join(RMAExpression_customCDFAnnotation, EntrezVsGeneSymbol, by="EntrezGeneID", type="left")
+
+head(RMAExpression_customCDFAnnotation2)
+
+sum(is.na(RMAExpression_customCDFAnnotation2[,3])==F) 
+#Number of probes with corresponding gene symbol name
+
+dim(RMAExpression_customCDFAnnotation2)
+
+#So almost all of the results have associated gene symbols now
+#Output custom annotation file
+write.csv(RMAExpression_customCDFAnnotation2, paste0(outDir, "RMAExpression_customCDFAnnotation2.csv"))
+
+
+```
+
+## Quality Control
+This code chunk checks observes the quality of the data and checks for outliers
+
+```{r qualityControl}
+
+#making numeric data matrix
+tempExpressionMatrix<-as.matrix(RMAExpression_customCDF[,-1])
+ 
+#Output of sample-sample correlation matrix
+write.csv(cor(tempExpressionMatrix), paste0(qcDir, "SamplevsSample_CorMatrix.csv"))
+
+#Viewing range of correlations between subjects to see if any subjects vary drastically
+range(cor(tempExpressionMatrix))
+#Range points to possible outlier(s)
+
+
+## Generating boxplot to observe subject expression distribution
+
+boxplot(data.frame(tempExpressionMatrix), cex=0.25, las=3, par(cex.axis=0.75), main="Boxplot of log signal values per sample (1 box=all filtered probes)", xlab="Sample ID", ylab="Log Signal")
+
+#Subjects 13F4-H07M1.1-HPC-HR-1 and 22F4-L08M2.0-HPC-LR-5 are outliers identified by John Stead, also appear in the cor matrix and expression boxplots
+#Need to remove both outliers and rename column "X" to ProbesetID
+
+colnames(RMAExpression_customCDF)
+
+
+Affy_F4_Data<-RMAExpression_customCDF[c(-2,-11)]
+colnames(Affy_F4_Data)[1]<-"ProbesetID"   #Renaming column X as probeset ID to be easily joined with annotation
+
+
+```
+
+## Annotatation
+The following code chunk uses the custom cdf to annotate the data
+
+```{r annotate}
+
+#Reading in annotation file
+Affy_F4_Annotation<-read.csv(paste0(outDir, "RMAExpression_customCDFAnnotation2.csv"))
+
+head(Affy_F4_Annotation)
+
+#removing unecessary first column
+Affy_F4_Annotation<-Affy_F4_Annotation[,-1]
+
+#Joining Gene Symbol annotation with expression data
+
+Affy_F4_Data<-join(Affy_F4_Annotation, Affy_F4_Data, by="ProbesetID", type="inner")
+
+dim(Affy_F4_Data)
+
+
+```
+
+## Normalization 
+The following code chunk removes NAs from the data and outputs annotated logbase2 transformed data. It then converts the log data to zscores and creates a zscore data output file
+
+
+``` {r normalize}
+
+#Remove values with Gene Symbol of NA
+
+Affy_F4_Data_NoNA<-subset(Affy_F4_Data, is.na(Affy_F4_Data$GeneSymbol)==FALSE)
+sum(duplicated(Affy_F4_Data_NoNA$GeneSymbol))
+
+#output annotated log transformed data
+write.csv(Affy_F4_Data_NoNA, paste0(outDir, "LogDataAnnotated_SteadAffyF4.csv"))
+
+
+#Now convert values to zscore by scaling
+
+affyZscore<-t(scale(t(Affy_F4_Data_NoNA[4:13]), center=T, scale=T))
+affyZscoreannotated<-cbind.data.frame(Affy_F4_Data_NoNA[c(1:3)], affyZscore)
+sum(duplicated(affyZscoreannotated$GeneSymbol))
+
+
+#output zscore transformed annotated data
+write.csv(affyZscoreannotated, paste0(outDir, "affyZscoreannotated.csv"))
+
+
+```
+
+## Cell Type Analysis
+The following code chunk joins the expression data to the cell type specific dataset and averages across cell type to get a mean relative cell-type expression value per subject
+
+```{r cellType}
+
+#reading in cell type specific info
+celltypeinfo<-read.csv("data/CellTypeSpecificGenes_Master3.csv")
+colnames(celltypeinfo)
+
+#rename "Gene.Symbol..Mouse" to "GeneSymbol" to join with Affy_Data
+colnames(celltypeinfo)[5]<-"GeneSymbol"
+
+affyzscore_celltype<-join(affyZscoreannotated, celltypeinfo, by="GeneSymbol", type="inner")
+dim(affyzscore_celltype)
+
+
+### Removing repeated cell types
+
+noPrimaryOverlap <- lapply(levels(affyzscore_celltype$CellType_Primary),
+                           function(x, celltype, gene) {
+                             
+                             # choose all data for a particular primary cell type
+                             tempData <- celltype[which(celltype$CellType_Primary == x), ]
+                             
+                             # get all gene symbols within the current primary cell type
+                             tempGenes <- tempData[[gene]]
+                             
+                             # gene symbols within all toher cell types
+                             otherGenes <- celltype[[gene]][which(celltype$CellType_Primary != x)]
+                             
+                             # now grab the rows which are not in otherGenes
+                             return(tempData[which(!(tempGenes %in% otherGenes)), ])
+                           }, celltype=affyzscore_celltype, gene = "GeneSymbol")
+
+# combine the results
+noPrimaryOverlap <- do.call(rbind, noPrimaryOverlap)
+
+# duplicate gene symbols
+sum(duplicated(noPrimaryOverlap$GeneSymbol))
+#Some genes have multiple publications associated with them for the same primary cell type
+
+# remove duplicate gene symbols
+noPrimaryOverlap_nodups<-subset(noPrimaryOverlap, 
+                                !duplicated(noPrimaryOverlap$GeneSymbol))
+
+dim(noPrimaryOverlap_nodups)
+#duplicated genes removed
+
+
+#### average over cell types
+valueCols <- colnames(Affy_F4_Data[4:13]) #subject names
+
+AverageByCellType <- sapply(valueCols, function(x, frame) {
+  tapply(frame[[x]], frame[["CellType_Primary"]], mean, na.rm = TRUE)
+}, frame = noPrimaryOverlap_nodups)
+
+
+write.csv(as.data.frame(AverageByCellType),
+               paste0(outDir, "AvgByCellType_AffyF4.csv")) #Output of average cell type expression per subject
+
+```
+
+## Phenotype Effect on Cell Type Expression
+The following code chunk observes the effect of phenotype expression on relative cell type expression. Phenotype information is added to the data and then boxplots of phenotype effect by cell type are generated which will be output in-file. Finally, an ANOVA is run across cell type expression by phenotype.
+
+```{r phenEffectCell, fig.height=4, fig.width=7}
+
+colnames(AverageByCellType)
+
+#phenotype not in repeating pattern so will just put in by hand
+#making object with phenotype as factor
+phenotype<-factor(c("LR", "HR", "LR", "HR", "LR", "HR", "LR", "HR", "HR", "LR"))
+
+#transposing so that subjects are now rows and colnames are cell types so that I can add in phenotype factor
+pheneffectscelltypeavg<-t(AverageByCellType)
+
+dimnames(pheneffectscelltypeavg)
+   
+
+pheneffectscelltypeavg<-cbind.data.frame(phenotype=phenotype, pheneffectscelltypeavg)
+
+##boxplots
+
+for (i in 2:11){
+  
+boxplot(pheneffectscelltypeavg[,i] ~ pheneffectscelltypeavg$phenotype, ylab=colnames(pheneffectscelltypeavg)[i], main=paste(colnames(pheneffectscelltypeavg)[i], "vs", colnames(pheneffectscelltypeavg)[1]), col=(i+20), border=(i+10), pch=20)
+		
+}
+
+```
+
+ANOVA of phenotype effects on relative cell type balance
+
+```{r cellANOVA, results="asis"}
+
+cNames <- colnames(pheneffectscelltypeavg)[2:11]
+
+anovaPhen <- lapply(pheneffectscelltypeavg[cNames], function(x, dataFrame) {
+  Anova(lm(x ~ phenotype, data = dataFrame, 
+           contrasts = list(phenotype=contr.sum)), 
+        type = 3)
+  }, dataFrame = pheneffectscelltypeavg)
+
+# Store it in matrix form
+CellTypeAnovaPvals <- matrix(0, 10, 1)
+colnames(CellTypeAnovaPvals) <- c("p-value")
+row.names(CellTypeAnovaPvals) <- colnames(pheneffectscelltypeavg[2:11])
+
+for (i in 1:10) {
+  CellTypeAnovaPvals[i, ] <- anovaPhen[[i]]$`Pr(>F)`[2]
+}
+
+# Save it
+write.csv(CellTypeAnovaPvals, 
+          paste0(outDir, "AffyF4_CellTypeAnovaPvals.csv"))
+
+
+# Printing ANOVA output in file
+for(i in 1:length(anovaPhen)){
+  print(kable(anovaPhen[[i]], caption=names(anovaPhen)[i]))
+}
+
+
+```
+
+## Phenotype Effect on Gene Expression
+The following code chunk adds phenotype information to the zscore transformed gene expression data and performs ANOVA to observe phenotype effect for each gene
+
+```{r pheneffectGene}
+
+colnames(affyZscoreannotated)
+
+
+#Taking only numeric data, transposing so subjects are rows and making colnames gene symbols
+
+row.names(affyZscoreannotated)<-affyZscoreannotated$GeneSymbol 
+zscoreinput<-cbind.data.frame(phenotype=phenotype, 
+                              t(affyZscoreannotated[,c(-1,-2,-3)])) #removing info cols and transposing, and adding phen info
+
+head(zscoreinput)[1] #checking for correct phenotype assignment
+dim(zscoreinput)
+
+###Phenotype effects by gene
+
+anovaOutput <- sapply(row.names(affyZscoreannotated), function(x, frame) {
+  
+  Anova(lm(frame[[x]] ~ phenotype,
+           data = frame,
+           contrasts = c(phenotype = contr.sum)),
+        type = 3)$"Pr(>F)"[2]
+  
+}, frame = zscoreinput)
+
+
+phenotypeEffects <- cbind.data.frame("GeneSymbol" = names(anovaOutput),
+                                     "p-value" = anovaOutput)
+
+phenotypeEffectsCellInfo <- join(phenotypeEffects, celltypeinfo,
+                                 by="GeneSymbol", type="left")  #Joining Pvals with Cell type info
+
+
+
+##Exporting gene expression analysis
+
+write.csv(phenotypeEffectsCellInfo, paste0(outDir, "PhenPvals_CellInfo_SteadF4Affy.csv"))
+
+
+
+```
+
+## T-Test Output for Meta-Analysis
+The following code chunk performs t-tests on phenotype effect by gene, and by average cell type, and creates output files to be used in the gene expression and cell type meta-analyses.
+
+
+```{r ttest}
+
+#Running t.test on log data for meta-analysis
+
+##Need to use original log data, not z scored data
+dim(Affy_F4_Data_NoNA)
+
+colnames(Affy_F4_Data_NoNA)
+
+
+#Removing ProbesetID and EntrezGeneID cols and make row.names=GeneSymbol
+AffyLogData<-Affy_F4_Data_NoNA[,c(-1,-2,-3)]
+
+row.names(AffyLogData)<- (Affy_F4_Data_NoNA$GeneSymbol)
+
+###transposing, adding phenotype info, and running t.test
+affylogdataphen<-cbind.data.frame(phenotype=phenotype, t(AffyLogData))
+
+
+#Run t-test
+
+phenTtests <- sapply(row.names(AffyLogData), function(x, frame) {
+              t.test(frame[[x]] ~ phenotype, data = frame)$statistic
+              }, frame = affylogdataphen)
+
+
+# write to file
+phenTtests <- as.data.frame(phenTtests)
+
+#t.test function adds .t after row.names, need to reannotate
+row.names(phenTtests)<-row.names(AffyLogData)
+colnames(phenTtests) <- c("t-test")
+
+write.csv(phenTtests, paste0(outDir, "Stead_AdultF4TT.csv"))
+
+
+## Cell Type T-test for Meta Analysis
+
+dim(pheneffectscelltypeavg)
+
+levels(pheneffectscelltypeavg$phenotype)
+
+
+Stead_AdultF4CellTypeTT_forMeta<-matrix(0, 10, 1)
+
+for(i in 2:11){
+  Stead_AdultF4CellTypeTT_forMeta[i-1,]<-(t.test(pheneffectscelltypeavg[,i]~phenotype, data=pheneffectscelltypeavg))$statistic
+}
+
+colnames(Stead_AdultF4CellTypeTT_forMeta)<-c("Stead_TT")
+row.names(Stead_AdultF4CellTypeTT_forMeta)<-colnames(pheneffectscelltypeavg[2:11])
+
+
+write.csv(Stead_AdultF4CellTypeTT_forMeta, paste0(outDir, "Stead_AdultF4CellTypeTT_forMeta.csv"))
+
+
+
+```
